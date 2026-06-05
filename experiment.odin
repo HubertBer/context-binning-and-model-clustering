@@ -16,15 +16,15 @@ map_to_symbols :: proc(data: $T) -> [dynamic]u8 {
 }
 
 main :: proc() {
-    data, ok := os.read_entire_file_from_filename("./data/text8")
-    if !ok {
+    data, ok := os.read_entire_file_from_path("./data/text8", context.allocator)
+    if ok != 0 {
         return
     }
 
     symbols := map_to_symbols(data)
-    fmt.printfln("Data:     {}", data[:10])
-    fmt.printfln("Symbols:  {}", symbols[:10])
-    fmt.printfln("Data length: {}", len(data))
+    fmt.printfln("Data:         {}", data[:10])
+    fmt.printfln("Symbols:      {}", symbols[:10])
+    fmt.printfln("Data length:  {}", len(data))
 
     experiment_context_binning(symbols[:])
 }
