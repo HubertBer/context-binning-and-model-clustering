@@ -133,12 +133,15 @@ arr3 :: #force_inline proc "contextless" (arr: []$T) -> [3]T {
 
 get_split_cost :: proc(n_idx: int, nodes: []node) -> f64 {
     n := nodes[n_idx]
-    if n.children[0] == -1 do return -1000000.0 
+    if n.children == {-1, -1} do return 1000000000000000000.0 
     return n.entropy - nodes[n.children[0]].entropy - nodes[n.children[1]].entropy
 }
 
 node_less :: proc(n0, n1: int) -> bool {
     nodes: []node = (cast(^[]node)context.user_ptr)^
+    // if nodes[n0].children == {-1, -1} do return true
+    // if nodes[n1].children == {-1, -1} do return false
+    // return nodes[n0].entropy > nodes[n1].entropy
     return get_split_cost(n0, nodes) > get_split_cost(n1, nodes)
 }
 
@@ -163,15 +166,13 @@ context_hierarchy :: proc (freq: [SYMBOLS2][SYMBOLS]u32) -> (parent: [dynamic]in
         append(&available, true)
         append(&parent, -1)
     }
-    fmt.printfln("Before np init")
-    
+
     for i in 0..<SYMBOLS2 {
         for j in (i+1)..<SYMBOLS2 {
             delta := calc_delta(nodes[i], nodes[j])
             append(&node_pairs, node_pair{delta, {i, j}})
         }
     }
-    fmt.printfln("Before heap make")
 
     heap.make(node_pairs[:], less)
     initial_node_count := len(nodes)
@@ -214,24 +215,21 @@ pick_k_contexts :: proc(parent: []int, nodes: []node, $K: int) -> (contexts: [K]
     contexts[0] = len(nodes) - 1
 
     on_heap := 1
-    last    := K
-    for i := 1; i < last; i += 1 {
-        heap.pop(contexts[: on_heap], less)
+    for on_heap < K {
+        heap.pop(contexts[:on_heap], less)
         top_id  := contexts[on_heap - 1]
         top     := nodes[top_id]
-        if top.children[0] == -1 {
-            last -= 1
-            contexts[last] = top_id
-            continue
-        }
+
+        if top.children == {-1, -1} do break
 
         contexts[on_heap - 1] = top.children[0]
         heap.push(contexts[:on_heap], less)
 
-        contexts[on_heap]     = top.children[1]
-        heap.push(contexts[:on_heap + 1], less)
+        contexts[on_heap] = top.children[1]
         on_heap += 1
+        heap.push(contexts[:on_heap], less)
     }
+    assert(on_heap == K)
     return
 }
 
@@ -278,9 +276,9 @@ no_binning :: proc (freq: ^[SYMBOLS2][SYMBOLS]u32) -> (context_map: [SYMBOLS2]in
         context_map[i] = i
     }
     for i in 0..<SYMBOLS2 {
-        smoothed_total := f64(math.sum(freq[i][:])) + f64(SYMBOLS)
+        smoothed_total := f64(math.sum(freq[i][:])) + f64(SYMBOLS) * .001
         for s in 0..<SYMBOLS {
-            pr[i][s] = (f64(freq[i][s]) + 1.0) / smoothed_total
+            pr[i][s] = (f64(freq[i][s]) + .001) / smoothed_total
         }
     }
     return
@@ -288,12 +286,8 @@ no_binning :: proc (freq: ^[SYMBOLS2][SYMBOLS]u32) -> (context_map: [SYMBOLS2]in
 
 
 experiment_context_binning :: proc(symbol_data: []u8) {
-    fmt.printfln("experiment")
-    
     freq            := calc_frequencies(symbol_data[:])
-    fmt.printfln("freq")
     parent, nodes   := context_hierarchy(freq)
-    fmt.printfln("conetxt_hierarchy")
     experiment :: proc (symbol_data: []u8, parent: []int, nodes: []node, $K: int) {
         contexts        := pick_k_contexts(parent[:], nodes[:], K)
         c_map, c_pr     := make_context_table(contexts, nodes[:])
@@ -303,14 +297,14 @@ experiment_context_binning :: proc(symbol_data: []u8) {
     context_eval(symbol_data, c_map, c_pr)
     experiment(symbol_data, parent[:], nodes[:], 1)
     experiment(symbol_data, parent[:], nodes[:], 2)
-    // experiment(symbol_data, parent[:], nodes[:], 4)
-    // experiment(symbol_data, parent[:], nodes[:], 8)
-    // experiment(symbol_data, parent[:], nodes[:], 16)
-    // experiment(symbol_data, parent[:], nodes[:], 32)
+    experiment(symbol_data, parent[:], nodes[:], 4)
+    experiment(symbol_data, parent[:], nodes[:], 8)
+    experiment(symbol_data, parent[:], nodes[:], 16)
+    experiment(symbol_data, parent[:], nodes[:], 32)
     experiment(symbol_data, parent[:], nodes[:], 64)
-    // experiment(symbol_data, parent[:], nodes[:], 128)
-    // experiment(symbol_data, parent[:], nodes[:], 256)
-    // experiment(symbol_data, parent[:], nodes[:], 512)
+    experiment(symbol_data, parent[:], nodes[:], 128)
+    experiment(symbol_data, parent[:], nodes[:], 256)
+    experiment(symbol_data, parent[:], nodes[:], 512)
     experiment(symbol_data, parent[:], nodes[:], 725)
     experiment(symbol_data, parent[:], nodes[:], 728)
     experiment(symbol_data, parent[:], nodes[:], 729)
