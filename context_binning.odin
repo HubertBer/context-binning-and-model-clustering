@@ -3,6 +3,7 @@ import "core:fmt"
 import "core:slice/heap"
 import "core:math"
 
+CONTEXTS    :: 2
 SYMBOLS     :: 27
 SYMBOLS2    :: SYMBOLS * SYMBOLS
 SYMBOLS3    :: SYMBOLS * SYMBOLS * SYMBOLS
@@ -132,7 +133,7 @@ arr3 :: #force_inline proc "contextless" (arr: []$T) -> [3]T {
 
 get_split_cost :: proc(n_idx: int, nodes: []node) -> f64 {
     n := nodes[n_idx]
-    if n.children[0] == -1 do return -1.0 
+    if n.children[0] == -1 do return -1000000.0 
     return n.entropy - nodes[n.children[0]].entropy - nodes[n.children[1]].entropy
 }
 
@@ -175,7 +176,6 @@ context_hierarchy :: proc (freq: [SYMBOLS2][SYMBOLS]u32) -> (parent: [dynamic]in
     heap.make(node_pairs[:], less)
     initial_node_count := len(nodes)
     for i in 1..<initial_node_count {
-        fmt.printfln("ith iteration {}", i)
         heap.pop(node_pairs[:], less)
         min_elem := pop(&node_pairs)
         for !available[min_elem.id[0]] || !available[min_elem.id[1]] {
@@ -213,16 +213,24 @@ pick_k_contexts :: proc(parent: []int, nodes: []node, $K: int) -> (contexts: [K]
     context.user_ptr = &nodes
     contexts[0] = len(nodes) - 1
 
-    for i in 1..<K {
-        heap.pop(contexts[: i], less)
-        top := nodes[contexts[i - 1]]
-        assert(top.children[0] >= 0)
+    on_heap := 1
+    last    := K
+    for i := 1; i < last; i += 1 {
+        heap.pop(contexts[: on_heap], less)
+        top_id  := contexts[on_heap - 1]
+        top     := nodes[top_id]
+        if top.children[0] == -1 {
+            last -= 1
+            contexts[last] = top_id
+            continue
+        }
 
-        contexts[i - 1] = top.children[0]
-        heap.push(contexts[:i], less)
+        contexts[on_heap - 1] = top.children[0]
+        heap.push(contexts[:on_heap], less)
 
-        contexts[i]     = top.children[1]
-        heap.push(contexts[:i + 1], less)
+        contexts[on_heap]     = top.children[1]
+        heap.push(contexts[:on_heap + 1], less)
+        on_heap += 1
     }
     return
 }
@@ -238,9 +246,9 @@ make_context_table :: proc (contexts: [$K]int, nodes: []node) -> (context_map: [
     }
     for v, i in contexts {
         update_children(i, v, nodes, &context_map)
-        smoothed_total := f64(nodes[v].total_freq) + f64(SYMBOLS)
+        smoothed_total := f64(nodes[v].total_freq) + f64(SYMBOLS) * .001
         for s in 0..<SYMBOLS {
-            pr[i][s] = (f64(nodes[v].freq[s]) + 1.0) / smoothed_total
+            pr[i][s] = (f64(nodes[v].freq[s]) + .001) / smoothed_total
         }
     }
     return
@@ -248,22 +256,36 @@ make_context_table :: proc (contexts: [$K]int, nodes: []node) -> (context_map: [
 
 context_eval :: proc(symbol_data: []u8, c_map: [SYMBOLS2]int, c_pr: [$K][SYMBOLS]f64) -> f64 {
     total_bits : f64 = f64(K) * 8// in bits 
-    for i in K..<len(symbol_data) {
+    for i in 2..<len(symbol_data) {
         ctx_id := mix(symbol_data[i-2], symbol_data[i-1])
         bin_id := c_map[ctx_id]
         p := c_pr[bin_id][symbol_data[i]]
         total_bits -= math.log2(p)
     }
-    fmt.printfln("Theoretical Bits Per Character (BPC): %f", total_bits / f64(len(symbol_data)))
+    fmt.printfln("Theoretical Bits Per Character (BPC) for {} contexts: %f", K, total_bits / f64(len(symbol_data)))
     return total_bits
 }
 
 calc_frequencies :: proc(symbol_data: []u8) -> (freq: [SYMBOLS2][SYMBOLS]u32) {
-    for i in 2..<len(symbol_data) {
+    for i in CONTEXTS..<len(symbol_data) {
         freq[mix(symbol_data[i-2], symbol_data[i-1])][symbol_data[i]] += 1
     }
     return
 }
+
+no_binning :: proc (freq: ^[SYMBOLS2][SYMBOLS]u32) -> (context_map: [SYMBOLS2]int, pr: [SYMBOLS2][SYMBOLS]f64) {
+    for i in 0..<SYMBOLS2 {
+        context_map[i] = i
+    }
+    for i in 0..<SYMBOLS2 {
+        smoothed_total := f64(math.sum(freq[i][:])) + f64(SYMBOLS)
+        for s in 0..<SYMBOLS {
+            pr[i][s] = (f64(freq[i][s]) + 1.0) / smoothed_total
+        }
+    }
+    return
+}
+
 
 experiment_context_binning :: proc(symbol_data: []u8) {
     fmt.printfln("experiment")
@@ -272,10 +294,24 @@ experiment_context_binning :: proc(symbol_data: []u8) {
     fmt.printfln("freq")
     parent, nodes   := context_hierarchy(freq)
     fmt.printfln("conetxt_hierarchy")
-    contexts        := pick_k_contexts(parent[:], nodes[:], 16)
-    fmt.printfln("pick k contexts")
-    c_map, c_pr     := make_context_table(contexts, nodes[:])
-    fmt.printfln("make context table")
+    experiment :: proc (symbol_data: []u8, parent: []int, nodes: []node, $K: int) {
+        contexts        := pick_k_contexts(parent[:], nodes[:], K)
+        c_map, c_pr     := make_context_table(contexts, nodes[:])
+        context_eval(symbol_data, c_map, c_pr)
+    }
+    c_map, c_pr := no_binning(&freq)
     context_eval(symbol_data, c_map, c_pr)
-    fmt.printfln("evaluate contexts")
+    experiment(symbol_data, parent[:], nodes[:], 1)
+    experiment(symbol_data, parent[:], nodes[:], 2)
+    // experiment(symbol_data, parent[:], nodes[:], 4)
+    // experiment(symbol_data, parent[:], nodes[:], 8)
+    // experiment(symbol_data, parent[:], nodes[:], 16)
+    // experiment(symbol_data, parent[:], nodes[:], 32)
+    experiment(symbol_data, parent[:], nodes[:], 64)
+    // experiment(symbol_data, parent[:], nodes[:], 128)
+    // experiment(symbol_data, parent[:], nodes[:], 256)
+    // experiment(symbol_data, parent[:], nodes[:], 512)
+    experiment(symbol_data, parent[:], nodes[:], 725)
+    experiment(symbol_data, parent[:], nodes[:], 728)
+    experiment(symbol_data, parent[:], nodes[:], 729)
 }
