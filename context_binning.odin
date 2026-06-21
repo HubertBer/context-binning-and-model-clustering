@@ -151,71 +151,43 @@ node_pair_less :: proc(p0, p1: node_pair) -> bool {
     return p0.delta > p1.delta
 }
 
+nonzero_contexts :: proc (freq: [][$M]u32) -> (nonzero_count: int) {
+    for i in 0..<len(freq) {
+        fr          := freq[i]
+        fr_total    := math.sum(fr[:])
+        if fr_total > 0 do nonzero_count += 1
+    }
+    return
+}
 
-context_hierarchy :: proc (freq: [][SYMBOLS]u32) -> (parent: [dynamic]int, nodes: [dynamic]node) {
-    NUM_STATES := len(freq)
-    available   : [dynamic]bool
-    node_pairs  : [dynamic]node_pair
-    
-    empty_nodes    : [dynamic]int
-    active_indices : [dynamic]int
+context_hierarchy :: proc (freq: [][$M]u32) -> (parent: [dynamic]int, nodes: [dynamic]node) {
+    available   :   [dynamic]bool
+    node_pairs  :   [dynamic]node_pair
 
-    for i in 0..<NUM_STATES {
+    for i in 0..<len(freq) {
         fr          := freq[i]
         fr_total    := math.sum(fr[:])
         e           := calc_entropy(fr, fr_total)
         append(&nodes, node{fr, fr_total, e, {-1, -1}})
         append(&available, true)
         append(&parent, -1)
-        
-        if fr_total == 0 {
-            append(&empty_nodes, i)
-        } else {
-            append(&active_indices, i)
-        }
     }
 
-    current_empty := -1
-    if len(empty_nodes) > 0 {
-        current_empty = empty_nodes[0]
-        empty_freq: [SYMBOLS]u32
-        
-        for i in 1..<len(empty_nodes) {
-            u := current_empty
-            v := empty_nodes[i]
-            
-            available[u] = false
-            available[v] = false
-            parent[u] = len(nodes)
-            parent[v] = len(nodes)
-            
-            append(&nodes, node{empty_freq, 0, 0.0, {u, v}})
-            append(&available, true)
-            append(&parent, -1)
-            
-            current_empty = len(nodes) - 1
-        }
-        append(&active_indices, current_empty) 
-    }
-
-    for idx1 in 0..<len(active_indices) {
-        for idx2 in (idx1+1)..<len(active_indices) {
-            u := active_indices[idx1]
-            v := active_indices[idx2]
-            delta := calc_delta(nodes[u], nodes[v])
-            append(&node_pairs, node_pair{delta, {u, v}})
+    for i in 0..<len(freq) {
+        for j in (i+1)..<len(freq) {
+            delta := calc_delta(nodes[i], nodes[j])
+            if delta != 0 do append(&node_pairs, node_pair{delta, {i, j}})
         }
     }
 
     heap.make(node_pairs[:], less)
-    
-    merges_to_do := len(active_indices) - 1
-    
-    for _ in 0..<merges_to_do {
+    initial_node_count := len(nodes)
+    outer: for i in 1..<initial_node_count {
+        if len(node_pairs) == 0 do break
         heap.pop(node_pairs[:], less)
         min_elem := pop(&node_pairs)
-        
         for !available[min_elem.id[0]] || !available[min_elem.id[1]] {
+            if len(node_pairs) == 0 do break outer
             heap.pop(node_pairs[:], less)
             min_elem = pop(&node_pairs)
         }
@@ -233,13 +205,13 @@ context_hierarchy :: proc (freq: [][SYMBOLS]u32) -> (parent: [dynamic]int, nodes
         e           := calc_entropy(fr, fr_total)
         append(&nodes, node{fr, fr_total, e, {l_id, r_id}})
         new_id := len(nodes) - 1
-        
         for i in 0..<new_id {
             if !available[i] do continue
 
-            delta := calc_delta(nodes[new_id], nodes[i])
-            append(&node_pairs, node_pair{delta, {new_id, i}})
-            heap.push(node_pairs[:], less)
+            if delta := calc_delta(nodes[new_id], nodes[i]); delta != 0 {
+                append(&node_pairs, node_pair{delta, {new_id, i}})
+                heap.push(node_pairs[:], less)
+            }
         }
     }
     return
@@ -355,9 +327,14 @@ calc_nested_frequencies :: proc(symbol_data: []u8, cmap_far: []int, cmap_near: [
 }
 
 experiment_context_binning :: proc(symbol_data: []u8) {
-    freq_12         := calc_frequencies(symbol_data[:])
-    parent, nodes   := context_hierarchy(freq_12[:])
-    experiment :: proc (symbol_data: []u8, parent: []int, nodes: []node, $K: int) {
+    freq_12             := calc_frequencies(symbol_data[:])
+    max_contexts_direct := 1 + nonzero_contexts(freq_12[:])
+    parent, nodes       := context_hierarchy(freq_12[:])
+    experiment :: proc (symbol_data: []u8, parent: []int, nodes: []node, max_contexts: int, $K: int) {
+        if K > max_contexts {
+            fmt.printfln("Nnumber of contexts provided {} is larger then the maximum number of contexts {}", K, max_contexts)
+            return
+        }
         contexts        := pick_k_contexts(parent[:], nodes[:], K)
         c_map, c_pr     := make_context_table(contexts, nodes[:], ORDER2_STATES)
         context_eval(symbol_data, c_map, c_pr)
@@ -366,19 +343,21 @@ experiment_context_binning :: proc(symbol_data: []u8) {
     fmt.println("DIRECT CONTEXT BINNING")
     c_map_all, c_pr_all := no_binning(&freq_12)
     context_eval(symbol_data, c_map_all, c_pr_all)
-    experiment(symbol_data, parent[:], nodes[:], 1)
-    experiment(symbol_data, parent[:], nodes[:], 2)
-    experiment(symbol_data, parent[:], nodes[:], 4)
-    experiment(symbol_data, parent[:], nodes[:], 8)
-    experiment(symbol_data, parent[:], nodes[:], 16)
-    experiment(symbol_data, parent[:], nodes[:], 32)
-    experiment(symbol_data, parent[:], nodes[:], 64)
-    experiment(symbol_data, parent[:], nodes[:], 128)
-    experiment(symbol_data, parent[:], nodes[:], 256)
-    experiment(symbol_data, parent[:], nodes[:], 512)
-    experiment(symbol_data, parent[:], nodes[:], 725)
-    experiment(symbol_data, parent[:], nodes[:], 728)
-    experiment(symbol_data, parent[:], nodes[:], 729)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct, 1)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  2)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  4)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  8)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  16)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  32)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  64)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  128)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  256)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  512)
+    // experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  725)
+    // experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  728)
+    // experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  729)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  621)
+    experiment(symbol_data, parent[:], nodes[:], max_contexts_direct,  729)
 
 
     fmt.println("NESTED CONTEXT BINNING SYMMETRIC SIMPLE")
@@ -388,26 +367,32 @@ experiment_context_binning :: proc(symbol_data: []u8) {
     c_map_64, c_pr_64   := make_context_table(c64, nodes[:], ORDER2_STATES)
     freq24              := calc_nested_frequencies(symbol_data[:], c_map_64[:], c_map_64[:], L1_BINS, L2_COMBINED_STATES)
     parent24, n24       := context_hierarchy(freq24[:])
+    max_contexts_sym    := nonzero_contexts(freq24[:])
 
-    nested_experiment   :: proc (symbol_data: []u8, c_map12: []int, parent: []int, nodes: []node, $K: int) {
+    nested_experiment   :: proc (symbol_data: []u8, c_map12: []int, parent: []int, nodes: []node, max_contexts: int, $K: int) {
+        if K > max_contexts {
+            fmt.printfln("Nnumber of contexts provided {} is larger then the maximum number of contexts {}", K, max_contexts)
+            return
+        }
         contexts        := pick_k_contexts(parent[:], nodes[:], K)
         c_map24, c_pr24 := make_context_table(contexts, nodes[:], L2_COMBINED_STATES)
         nested_context_eval(symbol_data, c_map12, c_map12, L1_BINS, c_map24[:], c_pr24)
     }
 
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 1)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 2)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 4)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 8)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 16)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 32)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 64)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 128)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 256)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 512)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 1024)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 2048)
-    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 4096)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  1)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  2)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  4)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  8)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  16)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  32)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  64)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  128)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  256)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  512)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  1024)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  1350)
+    // nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  2048)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], max_contexts_sym,  4096)
     
     fmt.println("NESTED CONTEXT BINNING SYMMETRIC (SEPARATE MAPS)")
     freq_34                 := calc_frequencies(symbol_data[:], 4, 3)
@@ -416,25 +401,31 @@ experiment_context_binning :: proc(symbol_data: []u8) {
     c_map_64_far, _         := make_context_table(c64_far, nodes_34[:], ORDER2_STATES)
     freq24_sep              := calc_nested_frequencies(symbol_data[:], c_map_64_far[:], c_map_64[:], L1_BINS, L2_COMBINED_STATES)
     parent24_sep, n24_sep   := context_hierarchy(freq24_sep[:])
+    max_contexts_sep        := nonzero_contexts(freq24_sep[:])
 
-    nested_experiment_sep   :: proc (symbol_data: []u8, cmap_far: []int, cmap_near: []int, parent: []int, nodes: []node, $K: int) {
+    nested_experiment_sep   :: proc (symbol_data: []u8, cmap_far: []int, cmap_near: []int, parent: []int, nodes: []node, max_contexts: int, $K: int) {
+        if K > max_contexts {
+            fmt.printfln("Nnumber of contexts provided {} is larger then the maximum number of contexts {}", K, max_contexts)
+            return
+        }
         contexts        := pick_k_contexts(parent[:], nodes[:], K)
         c_map24, c_pr24 := make_context_table(contexts, nodes[:], L2_COMBINED_STATES)
         nested_context_eval(symbol_data, cmap_far, cmap_near, L1_BINS, c_map24[:], c_pr24)
     }
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 1)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 2)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 4)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 8)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 16)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 32)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 64)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 128)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 256)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 512)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 1024)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 2048)
-    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], 4096)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  1)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  2)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  4)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  8)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  16)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  32)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  64)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  128)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  256)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  512)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  628)
+    // nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  1024)
+    // nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  2048)
+    nested_experiment_sep(symbol_data[:], c_map_64_far[:], c_map_64[:], parent24_sep[:], n24_sep[:], max_contexts_sep,  4096)
  
     
     fmt.println("--- NESTED ASYMMETRIC CONTEXT BINNING ---")
@@ -446,17 +437,22 @@ experiment_context_binning :: proc(symbol_data: []u8) {
     cmap_16_far, _      := make_context_table(c16_far, nodes_34[:], ORDER2_STATES)
     freq_asym           := calc_nested_frequencies(symbol_data[:], cmap_16_far[:], c_map_all[:], K_NEAR, COMBINED_N_ASYM)
     parent_asym, n_asym := context_hierarchy(freq_asym[:])
+    max_contexts_nested := nonzero_contexts(freq_asym[:])
 
-    asym_experiment :: proc (symbol_data: []u8, cmap_far: []int, cmap_near: []int, parent: []int, nodes: []node, $K: int) {
+    asym_experiment :: proc (symbol_data: []u8, cmap_far: []int, cmap_near: []int, parent: []int, nodes: []node, max_contexts: int, $K: int) {
+        if K > max_contexts {
+            fmt.printfln("Nnumber of contexts provided {} is larger then the maximum number of contexts {}", K, max_contexts)
+            return
+        }
         contexts             := pick_k_contexts(parent[:], nodes[:], K)
         c_map_combined, c_pr := make_context_table(contexts, nodes[:], COMBINED_N_ASYM)
         nested_context_eval(symbol_data, cmap_far, cmap_near, K_NEAR, c_map_combined[:], c_pr)
     }
 
-    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], 1)
-    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], 64)
-    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], 256)
-    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], 1024)
-    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], 4096)
-    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], 11664)
+    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], max_contexts_nested,  1)
+    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], max_contexts_nested,  64)
+    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], max_contexts_nested,  256)
+    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], max_contexts_nested,  1024)
+    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], max_contexts_nested,  2661)
+    asym_experiment(symbol_data[:], cmap_16_far[:], c_map_all[:], parent_asym[:], n_asym[:], max_contexts_nested,  11664)
 }
