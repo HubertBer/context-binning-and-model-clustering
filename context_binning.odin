@@ -154,11 +154,12 @@ node_pair_less :: proc(p0, p1: node_pair) -> bool {
     return p0.delta > p1.delta
 }
 
-context_hierarchy :: proc (freq: [SYMBOLS2][SYMBOLS]u32) -> (parent: [dynamic]int, nodes: [dynamic]node) {
+
+context_hierarchy :: proc (freq: [$N][$M]u32) -> (parent: [dynamic]int, nodes: [dynamic]node) {
     available   :   [dynamic]bool
     node_pairs  :   [dynamic]node_pair
 
-    for i in 0..<SYMBOLS2 {
+    for i in 0..<N {
         fr          := freq[i]
         fr_total    := math.sum(fr[:])
         e           := calc_entropy(fr, fr_total)
@@ -167,8 +168,8 @@ context_hierarchy :: proc (freq: [SYMBOLS2][SYMBOLS]u32) -> (parent: [dynamic]in
         append(&parent, -1)
     }
 
-    for i in 0..<SYMBOLS2 {
-        for j in (i+1)..<SYMBOLS2 {
+    for i in 0..<N {
+        for j in (i+1)..<N {
             delta := calc_delta(nodes[i], nodes[j])
             append(&node_pairs, node_pair{delta, {i, j}})
         }
@@ -235,10 +236,10 @@ pick_k_contexts :: proc(parent: []int, nodes: []node, $K: int) -> (contexts: [K]
 
 
 
-make_context_table :: proc (contexts: [$K]int, nodes: []node) -> (context_map: [SYMBOLS2]int, pr: [K][SYMBOLS]f64) {
-    update_children :: proc "contextless" (context_id: int, v: int, nodes: []node, context_map: ^[SYMBOLS2]int) {
+make_context_table :: proc (contexts: [$K]int, nodes: []node, $N: int) -> (context_map: [N]int, pr: [K][SYMBOLS]f64) {
+    update_children :: proc "contextless" (context_id: int, v: int, nodes: []node, context_map: ^[$N]int) {
         if v < 0 do return
-        if v < SYMBOLS2 do context_map[v] = context_id
+        if v < N do context_map[v] = context_id
         update_children(context_id, nodes[v].children.x, nodes, context_map)
         update_children(context_id, nodes[v].children.y, nodes, context_map)
     }
@@ -264,9 +265,9 @@ context_eval :: proc(symbol_data: []u8, c_map: [SYMBOLS2]int, c_pr: [$K][SYMBOLS
     return total_bits
 }
 
-calc_frequencies :: proc(symbol_data: []u8) -> (freq: [SYMBOLS2][SYMBOLS]u32) {
-    for i in CONTEXTS..<len(symbol_data) {
-        freq[mix(symbol_data[i-2], symbol_data[i-1])][symbol_data[i]] += 1
+calc_frequencies :: proc(symbol_data: []u8, offset_0 : int = 2, offset_1 : int = 1) -> (freq: [SYMBOLS2][SYMBOLS]u32) {
+    for i in offset_0..<len(symbol_data) {
+        freq[mix(symbol_data[i-offset_0], symbol_data[i-offset_1])][symbol_data[i]] += 1
     }
     return
 }
@@ -284,17 +285,37 @@ no_binning :: proc (freq: ^[SYMBOLS2][SYMBOLS]u32) -> (context_map: [SYMBOLS2]in
     return
 }
 
+nested_context_eval :: proc(symbol_data: []u8, c_map12: []int, c_map24: []int, c_pr: [$K][SYMBOLS]f64) -> f64 {
+    total_bits : f64 = 4.0 * 8.0
+    for i in 4..<len(symbol_data) {
+        far_ctx  := mix(symbol_data[i-4], symbol_data[i-3])
+        near_ctx := mix(symbol_data[i-2], symbol_data[i-1])
+        
+        far_bin  := c_map12[far_ctx]
+        near_bin := c_map12[near_ctx]
+        
+        combined_id := (far_bin * 64) + near_bin 
+        final_bin   := c_map24[combined_id]
+        
+        p := c_pr[final_bin][symbol_data[i]]
+        total_bits -= math.log2(p)
+    }
+    fmt.printfln("Nested Order-4 BPC for {} contexts: %f", K, total_bits / f64(len(symbol_data)))
+    return total_bits
+}
 
 experiment_context_binning :: proc(symbol_data: []u8) {
-    freq            := calc_frequencies(symbol_data[:])
-    parent, nodes   := context_hierarchy(freq)
+    freq_12         := calc_frequencies(symbol_data[:])
+    parent, nodes   := context_hierarchy(freq_12)
     experiment :: proc (symbol_data: []u8, parent: []int, nodes: []node, $K: int) {
         contexts        := pick_k_contexts(parent[:], nodes[:], K)
-        c_map, c_pr     := make_context_table(contexts, nodes[:])
+        c_map, c_pr     := make_context_table(contexts, nodes[:], SYMBOLS2)
         context_eval(symbol_data, c_map, c_pr)
     }
-    c_map, c_pr := no_binning(&freq)
-    context_eval(symbol_data, c_map, c_pr)
+    
+    fmt.println("DIRECT CONTEXT BINNING")
+    c_map_all, c_pr_all := no_binning(&freq_12)
+    context_eval(symbol_data, c_map_all, c_pr_all)
     experiment(symbol_data, parent[:], nodes[:], 1)
     experiment(symbol_data, parent[:], nodes[:], 2)
     experiment(symbol_data, parent[:], nodes[:], 4)
@@ -308,4 +329,52 @@ experiment_context_binning :: proc(symbol_data: []u8) {
     experiment(symbol_data, parent[:], nodes[:], 725)
     experiment(symbol_data, parent[:], nodes[:], 728)
     experiment(symbol_data, parent[:], nodes[:], 729)
+
+
+    fmt.println("NESTED CONTEXT BINNING")
+    NESTED_CONTEXTS_SYMMETRIC   :: 64 
+    NESTED_CONTEXTS_SYMMETRIC_2 :: NESTED_CONTEXTS_SYMMETRIC * NESTED_CONTEXTS_SYMMETRIC 
+    freq24: [NESTED_CONTEXTS_SYMMETRIC * NESTED_CONTEXTS_SYMMETRIC][SYMBOLS]u32 
+    c64                 := pick_k_contexts(parent[:], nodes[:], 64)
+    c_map_64, c_pr_64   := make_context_table(c64, nodes[:], SYMBOLS2)
+    for i in 4..<len(symbol_data) {
+        far_ctx  := mix(symbol_data[i-4], symbol_data[i-3])
+        near_ctx := mix(symbol_data[i-2], symbol_data[i-1])
+        
+        far_bin  := c_map_64[far_ctx]
+        near_bin := c_map_64[near_ctx]
+        
+        combined_id := (far_bin * 64) + near_bin
+        freq24[combined_id][symbol_data[i]] += 1
+    }
+
+        
+    parent24, n24 := context_hierarchy(freq24)
+
+    nested_experiment :: proc (symbol_data: []u8, c_map12: []int, parent: []int, nodes: []node, $K: int) {
+        contexts        := pick_k_contexts(parent[:], nodes[:], K)
+        c_map24, c_pr24 := make_context_table(contexts, nodes[:], NESTED_CONTEXTS_SYMMETRIC_2)
+        nested_context_eval(symbol_data, c_map12, c_map24[:], c_pr24)
+    }
+
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 1)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 2)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 4)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 8)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 16)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 32)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 64)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 128)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 256)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 512)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 1024)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 2048)
+    nested_experiment(symbol_data[:], c_map_64[:], parent24[:], n24[:], 4096)
+    
+    fmt.println("NESTED ASSYMETRIC CONTEXT BINNING")
+ 
+    
+    // contexts24    := pick_k_contexts(parent24[:], n24[:], 256)
+    // cmap24, cpr24 := make_context_table(contexts24, n24[:], 4096)
+
 }
