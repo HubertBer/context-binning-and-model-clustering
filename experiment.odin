@@ -26,5 +26,5 @@ main :: proc() {
     fmt.printfln("Symbols:      {}", symbols[:10])
     fmt.printfln("Data length:  {}", len(data))
 
-    experiment_context_binning(symbols[:])
+    catalog_context_binning(symbols[:])
 }
