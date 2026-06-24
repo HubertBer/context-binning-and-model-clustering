@@ -1,8 +1,9 @@
 package main
 import "core:math"
 import "core:math/rand"
+import "core:fmt"
 
-READ_LENGTH    :: 128
+READ_LENGTH    :: 5120
 CONTEXT_LENGTH :: 1
 EPSILON : f64 : 1e-5
 
@@ -113,10 +114,13 @@ kmeans_clustering :: proc($K: u32, all_stats: []ReadStats) -> [K]Model {
 
     assignments := make([]int, n)
     defer delete(assignments)
+    prev_assignments := make([]int, n)
+    defer delete(prev_assignments)
     logprobs := make([][SYMBOLS][SYMBOLS]f64, int(K))
     defer delete(logprobs)
 
-    for _ in 0..<25 {
+    for j := 0; ; j += 1 {
+        fmt.print("kmeans iteration:", j, "\n")
         // Precompute log-probs for all K models (only K*SYMBOLS^2 log2 calls total)
         for k in 0..<K {
             for ctx in 0..<SYMBOLS {
@@ -125,6 +129,8 @@ kmeans_clustering :: proc($K: u32, all_stats: []ReadStats) -> [K]Model {
                 }
             }
         }
+
+        copy(prev_assignments, assignments)
 
         // Assign each read to the model with lowest coding cost
         for i in 0..<n {
@@ -154,6 +160,15 @@ kmeans_clustering :: proc($K: u32, all_stats: []ReadStats) -> [K]Model {
             }
         }
         free_all(context.temp_allocator)
+
+        converged := true
+        for i in 0..<n {
+            if assignments[i] != prev_assignments[i] {
+                converged = false
+                break
+            }
+        }
+        if converged { break }
     }
 
     return models
