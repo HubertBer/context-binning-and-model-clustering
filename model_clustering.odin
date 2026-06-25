@@ -4,17 +4,27 @@ import "core:math/rand"
 import "core:fmt"
 
 READ_LENGTH    :: 5120
-CONTEXT_LENGTH :: 1
 EPSILON : f64 : 1e-5
 
-// Per-read precomputed count matrix: counts[prev_symbol][current_symbol]
+// Per-read precomputed count matrix, indexed by context BIN (not raw context):
+// counts[bin][current_symbol]. The number of bins comes from the Binner.
 ReadStats :: struct {
-    counts: [SYMBOLS][SYMBOLS]u32,
+    counts: [][SYMBOLS]u32,
 }
 
 Model :: struct {
-    prob_context:  [SYMBOLS]f64,          // p(context)
-    probabilities: [SYMBOLS][SYMBOLS]f64, // p(symbol | context)
+    prob_context:  []f64,          // p(bin)
+    probabilities: [][SYMBOLS]f64, // p(symbol | bin)
+}
+
+free_read_stats :: proc(stats: []ReadStats) {
+    for &s in stats { delete(s.counts) }
+    delete(stats)
+}
+
+free_model :: proc(m: ^Model) {
+    delete(m.prob_context)
+    delete(m.probabilities)
 }
 
 split_into_reads :: proc(data: []u8) -> [dynamic][READ_LENGTH]u8 {
@@ -26,106 +36,95 @@ split_into_reads :: proc(data: []u8) -> [dynamic][READ_LENGTH]u8 {
     return reads
 }
 
-// Precompute count matrices for all reads — called once before k-means.
-precompute_stats :: proc(reads: [][READ_LENGTH]u8) -> [dynamic]ReadStats {
-    stats := make([dynamic]ReadStats, len(reads))
+// Precompute per-read binned count matrices for all reads — called once before
+// k-means. Each position is mapped to a context bin via the global Binner.
+precompute_stats :: proc(b: ^Binner, reads: [][READ_LENGTH]u8) -> []ReadStats {
+    stats := make([]ReadStats, len(reads))
     for &read, i in reads {
-        for j in CONTEXT_LENGTH..<READ_LENGTH {
-            ctx := int(read[j-1])
-            sym := int(read[j])
-            stats[i].counts[ctx][sym] += 1
+        stats[i].counts = make([][SYMBOLS]u32, b.num_bins)
+        for j in b.min_context..<READ_LENGTH {
+            bin := compute_bin(b, read[:], j)
+            stats[i].counts[bin][read[j]] += 1
         }
     }
     return stats
 }
 
 // Build a model as the MLE from aggregated raw counts of a subset of reads.
-model_from_stats :: proc(all_stats: []ReadStats, indices: []int) -> Model {
-    agg: [SYMBOLS][SYMBOLS]f64
+model_from_stats :: proc(all_stats: []ReadStats, indices: []int, num_bins: int) -> Model {
+    agg := make([][SYMBOLS]f64, num_bins, context.temp_allocator)
     for idx in indices {
-        for ctx in 0..<SYMBOLS {
+        for bin in 0..<num_bins {
             for sym in 0..<SYMBOLS {
-                agg[ctx][sym] += f64(all_stats[idx].counts[ctx][sym])
+                agg[bin][sym] += f64(all_stats[idx].counts[bin][sym])
             }
         }
     }
     model: Model
+    model.prob_context  = make([]f64, num_bins)
+    model.probabilities = make([][SYMBOLS]f64, num_bins)
     ctx_total: f64 = 0.0
-    for ctx in 0..<SYMBOLS {
+    for bin in 0..<num_bins {
         row_sum: f64 = 0.0
-        for sym in 0..<SYMBOLS { row_sum += agg[ctx][sym] }
+        for sym in 0..<SYMBOLS { row_sum += agg[bin][sym] }
         smoothed := row_sum + f64(SYMBOLS) * EPSILON
-        model.prob_context[ctx] = row_sum + EPSILON
-        ctx_total += model.prob_context[ctx]
+        model.prob_context[bin] = row_sum + EPSILON
+        ctx_total += model.prob_context[bin]
         for sym in 0..<SYMBOLS {
-            model.probabilities[ctx][sym] = (agg[ctx][sym] + EPSILON) / smoothed
+            model.probabilities[bin][sym] = (agg[bin][sym] + EPSILON) / smoothed
         }
     }
-    for ctx in 0..<SYMBOLS { model.prob_context[ctx] /= ctx_total }
+    for bin in 0..<num_bins { model.prob_context[bin] /= ctx_total }
     return model
 }
 
 // Coding cost via dot product of counts with precomputed log-probs.
-// O(SYMBOLS^2) with no log2 — log2 is precomputed per model outside the read loop.
-assignment_cost :: proc(stats: ^ReadStats, logprobs: ^[SYMBOLS][SYMBOLS]f64) -> f64 {
+// log2 is precomputed per model outside the read loop.
+assignment_cost :: proc(stats: ^ReadStats, logprobs: [][SYMBOLS]f64) -> f64 {
     cost: f64 = 0.0
-    for ctx in 0..<SYMBOLS {
+    for bin in 0..<len(logprobs) {
         for sym in 0..<SYMBOLS {
-            cost -= f64(stats.counts[ctx][sym]) * logprobs[ctx][sym]
+            cost -= f64(stats.counts[bin][sym]) * logprobs[bin][sym]
         }
     }
     return cost
 }
 
-shannon_entropy :: proc(probs: ^[SYMBOLS]f64) -> f64 {
-    h: f64 = 0.0
-    for p in probs {
-        if p > 0.0 { h -= p * math.log2(p) }
-    }
-    return h
-}
-
-optimized_rate :: proc(model: ^Model) -> f64 {
-    rate: f64 = 0.0
-    for ctx in 0..<SYMBOLS {
-        probs := model.probabilities[ctx]
-        rate += model.prob_context[ctx] * shannon_entropy(&probs)
-    }
-    return rate
-}
-
-// K-means on precomputed stats. Pass all_stats from precompute_stats.
-kmeans_clustering :: proc($K: u32, all_stats: []ReadStats) -> [K]Model {
+kmeans_clustering :: proc(K: int, num_bins: int, all_stats: []ReadStats, quiet := false) -> []Model {
     n := len(all_stats)
 
-    // Shuffle to pick K random seed reads
     perm := make([]int, n)
     defer delete(perm)
     for i in 0..<n { perm[i] = i }
-    for i in 0..<int(K) {
+    for i in 0..<K {
         r := rand.int_range(i, n)
         perm[i], perm[r] = perm[r], perm[i]
     }
-    models: [K]Model
+    models := make([]Model, K)
     for k in 0..<K {
         seed := []int{perm[k]}
-        models[k] = model_from_stats(all_stats, seed)
+        models[k] = model_from_stats(all_stats, seed, num_bins)
     }
 
     assignments := make([]int, n)
     defer delete(assignments)
     prev_assignments := make([]int, n)
     defer delete(prev_assignments)
-    logprobs := make([][SYMBOLS][SYMBOLS]f64, int(K))
-    defer delete(logprobs)
+
+    logprobs := make([][][SYMBOLS]f64, K)
+    defer {
+        for k in 0..<K { delete(logprobs[k]) }
+        delete(logprobs)
+    }
+    for k in 0..<K { logprobs[k] = make([][SYMBOLS]f64, num_bins) }
 
     for j := 0; ; j += 1 {
-        fmt.print("kmeans iteration:", j, "\n")
-        // Precompute log-probs for all K models (only K*SYMBOLS^2 log2 calls total)
+        if !quiet do fmt.print("kmeans iteration:", j, "\n")
+        // Precompute log-probs for all K models
         for k in 0..<K {
-            for ctx in 0..<SYMBOLS {
+            for bin in 0..<num_bins {
                 for sym in 0..<SYMBOLS {
-                    logprobs[k][ctx][sym] = math.log2(models[k].probabilities[ctx][sym])
+                    logprobs[k][bin][sym] = math.log2(models[k].probabilities[bin][sym])
                 }
             }
         }
@@ -137,26 +136,25 @@ kmeans_clustering :: proc($K: u32, all_stats: []ReadStats) -> [K]Model {
             best_k := 0
             best_cost := math.INF_F64
             for k in 0..<K {
-                cost := assignment_cost(&all_stats[i], &logprobs[k])
+                cost := assignment_cost(&all_stats[i], logprobs[k])
                 if cost < best_cost {
                     best_cost = cost
-                    best_k = int(k)
+                    best_k = k
                 }
             }
             assignments[i] = best_k
         }
 
-        // Rebuild cluster membership lists
-        cluster_idx: [K][dynamic]int
+        cluster_idx := make([][dynamic]int, K, context.temp_allocator)
         for k in 0..<K {
             cluster_idx[k] = make([dynamic]int, 0, 0, context.temp_allocator)
         }
         for i in 0..<n { append(&cluster_idx[assignments[i]], i) }
 
-        // Update model for each cluster
         for k in 0..<K {
             if len(cluster_idx[k]) > 0 {
-                models[k] = model_from_stats(all_stats, cluster_idx[k][:])
+                free_model(&models[k])
+                models[k] = model_from_stats(all_stats, cluster_idx[k][:], num_bins)
             }
         }
         free_all(context.temp_allocator)

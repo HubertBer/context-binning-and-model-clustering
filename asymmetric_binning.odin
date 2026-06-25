@@ -4,9 +4,7 @@ import "core:fmt"
 asymmetric_binning :: proc(symbol_data: []u8) {
     freq_12         := calc_frequencies(symbol_data[:])
     parent, nodes   := context_hierarchy(freq_12[:])
-
     c_map_all, c_pr_all := no_binning(&freq_12)
-
     freq_34                 := calc_frequencies(symbol_data[:], 4, 3)
     parent_34, nodes_34     := context_hierarchy(freq_34[:])
 

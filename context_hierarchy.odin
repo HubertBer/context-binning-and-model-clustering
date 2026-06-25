@@ -162,6 +162,47 @@ pick_k_contexts :: proc(parent: []int, nodes: []node, $K: int) -> (contexts: [K]
     return
 }
 
+pick_k_contexts_dyn :: proc(nodes: []node, k: int, alloc := context.allocator) -> []int {
+    nodes := nodes
+    context.user_ptr = &nodes
+
+    buf := make([]int, k, alloc)
+    if k <= 0 do return buf[:0]
+    buf[0] = len(nodes) - 1
+
+    on_heap := 1
+    for on_heap < k {
+        heap.pop(buf[:on_heap], less)
+        top_id := buf[on_heap - 1]
+        top    := nodes[top_id]
+
+        if top.children == {-1, -1} do break
+
+        buf[on_heap - 1] = top.children[0]
+        heap.push(buf[:on_heap], less)
+
+        buf[on_heap] = top.children[1]
+        on_heap += 1
+        heap.push(buf[:on_heap], less)
+    }
+    return buf[:on_heap]
+}
+
+fill_context_map :: proc(bin_id: int, v: int, nodes: []node, num_states: int, cmap: []int) {
+    if v < 0 do return
+    if v < num_states do cmap[v] = bin_id
+    fill_context_map(bin_id, nodes[v].children.x, nodes, num_states, cmap)
+    fill_context_map(bin_id, nodes[v].children.y, nodes, num_states, cmap)
+}
+
+make_context_map_dyn :: proc(contexts: []int, nodes: []node, num_states: int, alloc := context.allocator) -> []int {
+    cmap := make([]int, num_states, alloc)
+    for v, i in contexts {
+        fill_context_map(i, v, nodes, num_states, cmap)
+    }
+    return cmap
+}
+
 make_context_table :: proc (contexts: [$TARGET_BINS]int, nodes: []node, $NUM_STATES: int) -> (context_map: [NUM_STATES]int, pr: [TARGET_BINS][SYMBOLS]f64) {
     update_children :: proc "contextless" (context_id: int, v: int, nodes: []node, context_map: ^[$NUM_STATES]int) {
         if v < 0 do return
@@ -171,9 +212,9 @@ make_context_table :: proc (contexts: [$TARGET_BINS]int, nodes: []node, $NUM_STA
     }
     for v, i in contexts {
         update_children(i, v, nodes, &context_map)
-        smoothed_total := f64(nodes[v].total_freq) + f64(SYMBOLS) * .001
+        smoothed_total := f64(nodes[v].total_freq) + f64(SYMBOLS) * EPSILON
         for s in 0..<SYMBOLS {
-            pr[i][s] = (f64(nodes[v].freq[s]) + .001) / smoothed_total
+            pr[i][s] = (f64(nodes[v].freq[s]) + EPSILON) / smoothed_total
         }
     }
     return
